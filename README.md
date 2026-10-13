@@ -1,6 +1,6 @@
 # End-to-End CI/CD Demo: Jenkins + Docker + Kubernetes
 
-A small Flask app plus a fully automated pipeline. Every `git push` is tested, packaged into a Docker image, pushed to a registry, and rolled out to Kubernetes, with automatic rollback if the release is unhealthy.
+A fully automated production-style CI/CD pipeline. Every `git push` runs isolated unit tests inside Docker, packages a minimal production image, pushes to Docker Hub, rolls out to a local Kubernetes (kind) cluster with zero downtime, runs an automated in-cluster smoke test, and triggers automatic rollback if health checks fail.
 
 ```
  git push ──► Jenkins ──► Unit tests ──► Docker build ──► Docker Hub ──► kubectl apply ──► Kubernetes (2 pods)
@@ -8,84 +8,195 @@ A small Flask app plus a fully automated pipeline. Every `git push` is tested, p
                 └────────── rollback on failure ◄──── smoke test ◄────────────┘
 ```
 
-## Project layout
+---
+
+## Project Layout
 
 | Path | Purpose |
 |------|---------|
-| `app/app.py` | Flask app: `/` (HTML page), `/health`, `/version` |
-| `tests/` | pytest unit tests |
-| `Dockerfile` | Multi-stage: `test` (runs pytest) and `runtime` (non-root, gunicorn) |
-| `Jenkinsfile` | Pipeline: checkout → test → build → push → deploy → smoke test → rollback on failure |
-| `k8s/` | Namespace, Deployment (rolling update, probes, limits), NodePort Service |
-| `k8s/optional/` | HPA (autoscaling) and Ingress examples |
-| `jenkins/` | Jenkins image with docker CLI + kubectl; compose files; optional JCasC auto-config |
-| `kind/` | Local cluster config exposing the app on `localhost:8081` |
-| `scripts/` | `setup.sh`, `teardown.sh`, `local-test.sh` |
-| `Makefile` | Shortcuts (`make help`) |
-| `docs/TROUBLESHOOTING.md` | Common errors and fixes |
+| `app/app.py` | Python Flask microservice: `/` (HTML dashboard), `/health`, `/version` |
+| `tests/test_app.py` | Pytest unit test suite |
+| `Dockerfile` | Multi-stage build: `test` (runs pytest) and `runtime` (non-root `appuser`, gunicorn) |
+| `Jenkinsfile` | Declarative Pipeline: checkout → test → build → push → deploy → smoke test → rollback |
+| `k8s/` | Kubernetes manifests: Namespace, Deployment (rolling update, probes, limits), NodePort Service |
+| `jenkins/` | Jenkins Dockerfile (Docker CLI + kubectl), Docker Compose, and JCasC auto-config |
+| `kind/` | Kind cluster config mapping NodePort `30080` to `localhost:8081` |
+| `scripts/` | Shell automation: `setup.sh`, `local-test.sh`, `teardown.sh` |
+| `Makefile` | Linux/WSL2 shortcuts (`make help`, `make test`, etc.) |
+| `CICD_Demo_Presentation.pptx` | 10-slide enterprise presentation deck |
+
+---
 
 ## Prerequisites
-Docker, [kind](https://kind.sigs.k8s.io/), kubectl, a Docker Hub account (+ access token), and a Git repo (GitHub etc.). On Windows use WSL2.
 
-## Step 0. Try it locally (no Jenkins, no cluster)
-```bash
-make local-test        # runs tests, builds the image, starts it, probes /health and /version
+Ensure the following tools are installed:
+1. **Docker Desktop** (running with Linux containers enabled)
+2. **kind** (`kind --version`)
+   - *Windows install*: `Invoke-WebRequest -Uri "https://kind.sigs.k8s.io/dl/v0.27.0/kind-windows-amd64" -OutFile "$env:LOCALAPPDATA\Microsoft\WindowsApps\kind.exe"`
+3. **kubectl** (`kubectl version --client`)
+4. **Docker Hub Account** + Personal Access Token (PAT with *Read, Write, Delete* permissions)
+5. **Git & GitHub repository**
+
+---
+
+## Complete Command Guide
+
+### Step 0: Local Test (No Jenkins, No Kubernetes)
+Runs unit tests inside Docker, builds the runtime image, starts a local container, and verifies endpoints.
+
+#### Windows (PowerShell)
+```powershell
+# 1. Run unit tests in Docker
+docker build --target test -t cicd-demo:test .
+
+# 2. Build runtime image
+docker build --target runtime -t cicd-demo:local .
+
+# 3. Start container
+docker run -d --name cicd-demo-smoke -p 5000:5000 cicd-demo:local
+
+# 4. Probe health & version
+Invoke-RestMethod http://localhost:5000/health
+Invoke-RestMethod http://localhost:5000/version
+
+# 5. Clean up test container
+docker rm -f cicd-demo-smoke
 ```
 
-## Step 1. Put the project in Git and set your Docker Hub user
-1. Edit `DOCKERHUB_USER` at the top of the `Jenkinsfile`.
-2. `git init && git add . && git commit -m "init"`, then push to your repo.
-
-## Step 2. Create the cluster and Jenkins
-
-### Option A: Automatic (recommended)
+#### Linux / WSL2 (Bash)
 ```bash
-cp jenkins/.env.example jenkins/.env      # fill in Docker Hub token, repo URL, admin password
+./scripts/local-test.sh
+# or using Makefile:
+make local-test
+```
+
+---
+
+### Step 1: Configure Git & Docker Hub Credentials
+
+1. Update `DOCKERHUB_USER` in `Jenkinsfile`:
+   ```groovy
+   DOCKERHUB_USER = 'your-dockerhub-username'
+   ```
+
+2. Create `jenkins/.env` (gitignored, contains secrets for Jenkins auto-configuration):
+   ```env
+   JENKINS_ADMIN_PASSWORD=admin123
+   DOCKERHUB_USERNAME=your-dockerhub-username
+   DOCKERHUB_TOKEN=your-dockerhub-access-token
+   GIT_REPO_URL=https://github.com/your-username/cicd-demo-jenkins.git
+   GIT_BRANCH=main
+   ```
+
+3. Commit and push code:
+   ```bash
+   git init
+   git add .
+   git commit -m "init: CI/CD demo setup"
+   git branch -M main
+   git remote add origin https://github.com/your-username/cicd-demo-jenkins.git
+   git push -u origin main
+   ```
+
+---
+
+### Step 2: Create the Kubernetes Cluster & Start Jenkins
+
+#### Windows (PowerShell)
+```powershell
+# 1. Create kind cluster
+kind create cluster --name cicd --config kind/kind-config.yaml
+
+# 2. Generate UTF-8 kubeconfig (internal address reachable by Jenkins)
+$content = kind get kubeconfig --internal --name cicd
+[System.IO.File]::WriteAllText("$PWD\kubeconfig", ($content -join "`n") + "`n", [System.Text.UTF8Encoding]::new($false))
+
+# 3. Build & start Jenkins with JCasC auto-configuration
+docker compose -f jenkins/docker-compose.yml -f jenkins/docker-compose.casc.yml up -d --build
+
+# 4. Connect Jenkins container to the kind network
+docker network connect kind jenkins
+```
+
+#### Linux / WSL2 (Bash)
+```bash
 ./scripts/setup.sh
-```
-This creates the kind cluster, generates `kubeconfig`, starts Jenkins, connects it to the cluster network, and (via Configuration-as-Code) **auto-creates the `dockerhub-creds` and `kubeconfig` credentials and the `cicd-demo` pipeline job**. Log in at http://localhost:8080 as `admin`.
-
-### Option B: Manual
-```bash
-./scripts/setup.sh                        # without jenkins/.env it prints the unlock password
-```
-Then in Jenkins (http://localhost:8080): install suggested plugins, and add credentials under **Manage Jenkins → Credentials → Global**:
-
-| ID | Kind | Value |
-|----|------|-------|
-| `dockerhub-creds` | Username with password | Docker Hub user + access token |
-| `kubeconfig` | Secret file | the generated `kubeconfig` file |
-
-Create the job: **New Item → Pipeline → Pipeline script from SCM → Git** → your repo URL, branch, script path `Jenkinsfile`.
-
-## Step 3. Run the pipeline
-Click **Build Now** (or push a commit; the job polls Git every ~2 minutes, or add a webhook to `http://<host>:8080/github-webhook/`).
-
-## Step 4. Verify
-```bash
-make status                        # pods and service
-curl http://localhost:8081/version
-```
-Refresh http://localhost:8081 to see different pod names answering (load balancing).
-
-## Demo scenarios
-1. **Auto-deploy:** change the heading in `app/app.py`, commit, push. A new build runs and the page shows the new version tag.
-2. **Test gate:** break a test and push. The pipeline stops at *Unit Tests* and nothing is deployed.
-3. **Rollback:** make `/health` return HTTP 500 and push. The rollout fails and Jenkins runs `kubectl rollout undo`.
-4. **Autoscaling (optional):** install metrics-server, `kubectl apply -f k8s/optional/hpa.yaml`.
-
-## Deploy without Jenkins (quick check of the K8s side)
-```bash
-make deploy-local                  # builds image, loads it into kind, applies manifests
+# or:
+make cluster
 ```
 
-## Cleanup
-```bash
-make clean
+*Access Jenkins at:* **http://localhost:8080** (Login: `admin` / `admin123`).  
+The pipeline job `cicd-demo` and credentials (`dockerhub-creds`, `kubeconfig`) are automatically created via JCasC!
+
+---
+
+### Step 3: Run the Jenkins Pipeline
+
+* **Option A (Web UI):** Open http://localhost:8080 &rarr; Click **cicd-demo** &rarr; Click **Build Now**.
+* **Option B (PowerShell CLI):**
+  ```powershell
+  $cred = [Convert]::ToBase64String([Text.Encoding]::ASCII.GetBytes("admin:admin123"))
+  $headers = @{Authorization="Basic $cred"}
+  $session = New-Object Microsoft.PowerShell.Commands.WebRequestSession
+  $crumbResponse = Invoke-RestMethod -Uri "http://localhost:8080/crumbIssuer/api/json" -Headers $headers -WebSession $session
+  $headers[$crumbResponse.crumbRequestField] = $crumbResponse.crumb
+  Invoke-WebRequest -Uri "http://localhost:8080/job/cicd-demo/build" -Method POST -Headers $headers -WebSession $session
+  ```
+* **Option C (Automatic):** Push any commit to your GitHub repository (Jenkins polls every ~2 minutes).
+
+---
+
+### Step 4: Verify the Deployment
+
+```powershell
+# Check pods and services in the namespace
+kubectl -n cicd-demo get pods,svc
+
+# Check application version endpoint
+Invoke-RestMethod http://localhost:8081/version
+
+# Test round-robin load balancing across replicas
+1..4 | ForEach-Object { (Invoke-RestMethod -Uri http://localhost:8081/version).pod }
 ```
 
-## Security notes (read before reusing)
-This is a teaching setup. Jenkins runs as root with the host Docker socket, and the kubeconfig is cluster-admin. For real use: Kaniko/rootless builders or dedicated agents, a private registry with image scanning (Trivy), a namespaced ServiceAccount token instead of an admin kubeconfig, Ingress with TLS, and Helm or Argo CD for GitOps. `kubeconfig` and `jenkins/.env` are git-ignored and docker-ignored; never commit them.
+* **Live App URL:** http://localhost:8081
+* **Health Probe:** http://localhost:8081/health
+* **Version & Pod Info:** http://localhost:8081/version
 
-## Known limitations
-Verified: unit tests, app startup under gunicorn, YAML/shell/Makefile syntax. The Jenkins, Docker, and kind steps depend on your local environment; if something fails see `docs/TROUBLESHOOTING.md`.
+---
+
+### Managing Running Services (Pause, Resume, Clean Up)
+
+#### Pause Services (Stop background containers to free CPU/Memory)
+```powershell
+docker stop jenkins cicd-control-plane
+```
+
+#### Resume Services (Restart containers when ready to work)
+```powershell
+docker start cicd-control-plane jenkins
+```
+
+#### Complete Teardown & Clean Up
+```powershell
+# Remove Jenkins container and volumes
+docker compose -f jenkins/docker-compose.yml down -v
+
+# Delete the kind Kubernetes cluster
+kind delete cluster --name cicd
+
+# Remove generated kubeconfig
+Remove-Item kubeconfig -ErrorAction SilentlyContinue
+```
+*(On Linux/macOS, simply run `./scripts/teardown.sh` or `make clean`)*
+
+---
+
+## Presentation Deck
+
+A 10-slide PowerPoint presentation is generated in the root directory:
+* [`CICD_Demo_Presentation.pptx`](file:///c:/Users/Krishna%20SREE/Downloads/cicd-demo/CICD_Demo_Presentation.pptx)
+* To regenerate the presentation at any time:
+  ```powershell
+  python generate_presentation.py
+  ```

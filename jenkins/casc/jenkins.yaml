@@ -1,0 +1,45 @@
+# Optional. Used only with docker-compose.casc.yml (see README, "Option A").
+jenkins:
+  systemMessage: "CI/CD demo Jenkins (configured by JCasC)"
+  numExecutors: 2
+  securityRealm:
+    local:
+      allowsSignup: false
+      users:
+        - id: "admin"
+          password: "${JENKINS_ADMIN_PASSWORD:-admin123}"
+  authorizationStrategy:
+    loggedInUsersCanDoAnything:
+      allowAnonymousRead: false
+
+credentials:
+  system:
+    domainCredentials:
+      - credentials:
+          - usernamePassword:
+              scope: GLOBAL
+              id: "dockerhub-creds"
+              username: "${DOCKERHUB_USERNAME}"
+              password: "${DOCKERHUB_TOKEN}"
+          - file:
+              scope: GLOBAL
+              id: "kubeconfig"
+              fileName: "kubeconfig"
+              secretBytes: "${base64:${readFile:/casc/kubeconfig}}"
+
+jobs:
+  - script: >
+      pipelineJob('cicd-demo') {
+        triggers { scm('H/2 * * * *') }
+        definition {
+          cpsScm {
+            scm {
+              git {
+                remote { url('${GIT_REPO_URL}') }
+                branch('*/${GIT_BRANCH:-main}')
+              }
+            }
+            scriptPath('Jenkinsfile')
+          }
+        }
+      }

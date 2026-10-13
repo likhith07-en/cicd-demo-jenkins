@@ -1,0 +1,19 @@
+# Requires an ingress controller (e.g. ingress-nginx). Host entry: cicd-demo.local -> your node/LB IP
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: cicd-demo
+  namespace: cicd-demo
+spec:
+  ingressClassName: nginx
+  rules:
+    - host: cicd-demo.local
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: cicd-demo
+                port:
+                  number: 80

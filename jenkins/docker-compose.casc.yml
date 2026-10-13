@@ -1,0 +1,10 @@
+# Override file: docker compose -f docker-compose.yml -f docker-compose.casc.yml up -d --build
+services:
+  jenkins:
+    env_file: .env
+    environment:
+      - JAVA_OPTS=-Djenkins.install.runSetupWizard=false
+      - CASC_JENKINS_CONFIG=/casc/jenkins.yaml
+    volumes:
+      - ./casc/jenkins.yaml:/casc/jenkins.yaml:ro
+      - ../kubeconfig:/casc/kubeconfig:ro

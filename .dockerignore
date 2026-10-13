@@ -1,0 +1,14 @@
+.git
+__pycache__
+*.pyc
+.pytest_cache
+kubeconfig
+.env
+jenkins
+k8s
+kind
+scripts
+docs
+Makefile
+README.md
+Jenkinsfile
